@@ -1,0 +1,95 @@
+name: Build iPad IPA from Zip
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unzip project archive
+        shell: bash
+        run: |
+          set -e
+          echo "Finding zip file in repository..."
+          ZIP_FILE="$(find . -maxdepth 2 -name "*.zip" | head -n 1)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Error: No zip file found in repository!"
+            ls -la
+            exit 1
+          fi
+          echo "Unzipping: $ZIP_FILE"
+          unzip -q -o "$ZIP_FILE" -d .
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -e
+          XCODE_APP="$(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' | sort -V | tail -1)"
+          if [ -z "$XCODE_APP" ]; then echo 'No Xcode installation found'; exit 1; fi
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+
+      - name: Locate Project and Build Release App
+        shell: bash
+        run: |
+          set -e
+          PROJECT_PATH="$(find . -name "*.xcodeproj" -not -path "*/.*" | head -n 1)"
+          if [ -z "$PROJECT_PATH" ]; then
+            echo "Error: Could not find any .xcodeproj after unzipping!"
+            find . -maxdepth 3
+            exit 1
+          fi
+          PROJECT_DIR="$(dirname "$PROJECT_PATH")"
+          PROJECT_NAME="$(basename "$PROJECT_PATH")"
+          echo "Found project: $PROJECT_NAME in $PROJECT_DIR"
+          
+          cd "$PROJECT_DIR"
+          SCHEME_NAME="$(xcodebuild -list -project "$PROJECT_NAME" | grep -A 5 "Schemes:" | tail -n +2 | tr -d ' ' | head -n 1)"
+          echo "Using scheme: $SCHEME_NAME"
+
+          xcodebuild \
+            -project "$PROJECT_NAME" \
+            -scheme "$SCHEME_NAME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build
+
+      - name: Package TrollStore-friendly IPA
+        shell: bash
+        run: |
+          set -e
+          APP="$(find . -path '*/build/Build/Products/Release-iphoneos/*.app' -type d | head -1)"
+          if [ -z "$APP" ]; then echo 'Built .app not found'; exit 1; fi
+          rm -rf Payload DuoLikeAnimation-iPad.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          APP_IN_PAYLOAD="$(find Payload -maxdepth 1 -name '*.app' -type d | head -1)"
+          codesign --force --deep --sign - "$APP_IN_PAYLOAD"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload DuoLikeAnimation-iPad.ipa
+          rm -rf Payload
+          mkdir -p artifacts
+          mv DuoLikeAnimation-iPad.ipa artifacts/
+          echo "IPA created: artifacts/DuoLikeAnimation-iPad.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DuoLikeAnimation-iPad-IPA
+          path: artifacts/DuoLikeAnimation-iPad.ipa
+          if-no-files-found: error
+          retention-days: 14
